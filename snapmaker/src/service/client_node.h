@@ -65,7 +65,8 @@
 #define CMD_ID_JOB_GET_FEEDRATE_PERCENTAGE            (0x0f)
 #define CMD_ID_JOB_SET_FLOWRATE_PERCENTAGE            (0x10)
 #define CMD_ID_JOB_GET_FLOWRATE_PERCENTAGE            (0x11)
-#define CMD_ID_JOB_CTRL_NUM                           (18)
+#define CMD_ID_JOB_CTRL_ACK_COMPLETE                  (0x12)
+#define CMD_ID_JOB_CTRL_NUM                           (19)
 #define SUB_ID_JOB_CTRL_CUR_LINE_NUM                  (0xA0)
 
 #define CMD_SET_SYS                                   (1)
@@ -230,6 +231,7 @@ class ClientNode {
     err_code_t req_pause_job(ClientNode *client, sacp_hmi_message_t*);
     err_code_t req_resume_job(ClientNode *client, sacp_hmi_message_t*);
     err_code_t req_stop_job(ClientNode *client, sacp_hmi_message_t*);
+    err_code_t req_ack_complete(sacp_hmi_message_t* msg);
     err_code_t req_set_feedrate_percentage(sacp_hmi_message_t* msg);
     err_code_t req_get_feedrate_percentage(sacp_hmi_message_t* msg);
     err_code_t req_set_flowrate_percentage(sacp_hmi_message_t* msg);

@@ -95,6 +95,8 @@
 #define RESUME_RETRACT_E_LENGTH            1.0
 
 #define JOB_CTRL_LOOP_TIME_MS              (100)
+/* 0 = stay COMPLETED until HMI 0xAC/0x12; no auto-idle timeout. */
+#define JOB_COMPLETED_HOLD_MS              (0)
 #define JOB_CTRL_REQ_INFO_BUF              ((sizeof(struct JobCtrlReqInfo) + 8) * 4)
 #define DO_JOB_REQ_NOTIFY_CB(cb, p, ret)   do { if(cb) (cb)(p, ret); } while(0)
 #define GCODE_REQ_BUFFER_MIN               512
@@ -276,6 +278,8 @@ class JobCtrl {
     inline uint8_t get_job_print_mark(void) { return job_print_mark; }
     uint32_t get_job_print_seconds(void);
     bool get_req_stop_trigger(void) { return req_stop_trigger; }
+    err_code_t ack_complete(void);
+    void check_completed_timeout(void);
 
   // private methods
   private:
@@ -315,6 +319,7 @@ class JobCtrl {
     bool need_pre_extrusion;
 
     uint8_t job_print_mark = 0xFF;
+    uint32_t completed_tick_ms;
     // static TimerHandle_t job_print_timer;
 
     JobCtrlNotifyHandle notify_handle_started[JOB_CTRL_NOTIFY_QUEUE_SIZE];

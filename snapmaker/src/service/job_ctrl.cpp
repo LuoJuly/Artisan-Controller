@@ -95,6 +95,7 @@ void JobCtrl::init(void) {
   job_print_seconds = 0;
   job_printing_flag = false;
   need_pre_extrusion = true;
+  completed_tick_ms = 0;
 
   if (!job_print_timer) {
     job_print_timer = xTimerCreate( "job_print_timer",
@@ -182,6 +183,8 @@ void JobCtrl::request_gcode_process(void *p) {
       _statistics_log_last_tick_ms = system_svc.millis();
     }
   }
+
+  check_completed_timeout();
 
 //   if (got_last_gcode_packet && _gcode_rb.is_empty()) {
 //     if (smprinter.on_printing()) {
@@ -839,6 +842,54 @@ void JobCtrl::issue_nodify(uint8_t issue_ret) {
   ClientNode::issue_client(_client_id, issue_ret);
 }
 
+err_code_t JobCtrl::ack_complete(void) {
+  enum SystemStatus cur = smprinter.get_sys_status();
+
+  if (SYSTEM_STATUS_IDLE == cur) {
+    completed_tick_ms = 0;
+    return E_SUCCESS;
+  }
+
+  if (SYSTEM_STATUS_COMPLETED != cur) {
+    LOG_W("job ctrl: ack complete ignored, status %u\r\n", cur);
+    return E_INVALID_STATE;
+  }
+
+  if (E_SUCCESS != smprinter.set_sys_status(SYSTEM_STATUS_IDLE, NULL)) {
+    LOG_E("job ctrl: ack complete failed to enter idle\r\n");
+    return E_FAILURE;
+  }
+
+  completed_tick_ms = 0;
+  LOG_I("job ctrl: complete acked, enter idle\r\n");
+  return E_SUCCESS;
+}
+
+void JobCtrl::check_completed_timeout(void) {
+  if (0 == JOB_COMPLETED_HOLD_MS) {
+    return;
+  }
+
+  if (SYSTEM_STATUS_COMPLETED != smprinter.get_sys_status()) {
+    completed_tick_ms = 0;
+    return;
+  }
+
+  if (0 == completed_tick_ms) {
+    completed_tick_ms = system_svc.millis();
+    if (0 == completed_tick_ms) {
+      completed_tick_ms = 1;
+    }
+    return;
+  }
+
+  if (time_after(system_svc.millis(), completed_tick_ms + JOB_COMPLETED_HOLD_MS)) {
+    LOG_W("job ctrl: completed timeout, enter idle\r\n");
+    smprinter.set_sys_status(SYSTEM_STATUS_IDLE, NULL);
+    completed_tick_ms = 0;
+  }
+}
+
 void JobCtrl::statistics_output(void) {
   uint32_t rb_size = _gcode_rb.free() + _gcode_rb.available();
 
@@ -1252,6 +1303,7 @@ void JobCtrl::do_resume(struct JobCtrlReqInfo &jri) {
 void JobCtrl::do_stop(struct JobCtrlReqInfo &jri) {
   enum SystemStatus ret_sys_status;
   uint32_t tmp = 0;
+  bool hold_completed = false;
 
   if (SYSTEM_STATUS_PRINTING == smprinter.get_sys_status()) {
     if (E_SUCCESS != smprinter.set_sys_status(SYSTEM_STATUS_STOPING, &ret_sys_status)) {
@@ -1357,10 +1409,18 @@ void JobCtrl::do_stop(struct JobCtrlReqInfo &jri) {
     goto exit_do_stop;
   }
 
+  // Hold COMPLETED until HMI 0xAC/0x12 (screen Complete), only for a normal
+  // finished job that started from idle. Calibration / user-stop still go idle.
+  hold_completed = (STOP_NORMAL == jri.req_data.req_stop_data.type &&
+                    E_JOB_ISSUE_RET_FINISH == jri.req_data.req_stop_data.reason &&
+                    SYSTEM_STATUS_IDLE == status_before_start);
+
   // normal printing
   if (SYSTEM_STATUS_PRINTING == smprinter.get_sys_status()) {
-    if (E_SUCCESS != smprinter.set_sys_status(SYSTEM_STATUS_IDLE, &ret_sys_status)) {
-      LOG_E("job ctrl: can not enter SYS_IDLE status");
+    enum SystemStatus next_status = hold_completed ? SYSTEM_STATUS_COMPLETED : SYSTEM_STATUS_IDLE;
+    if (E_SUCCESS != smprinter.set_sys_status(next_status, &ret_sys_status)) {
+      LOG_E("job ctrl: can not enter status %u, fallback idle", next_status);
+      hold_completed = false;
       smprinter.set_sys_status(SYSTEM_STATUS_IDLE, &ret_sys_status);
       DO_JOB_REQ_NOTIFY_CB(jri.cb, jri.param, E_FAILURE);
       _issue_ret_rb.insert_one(SACP_JOB_PAUSE_ISSUE_RET_STOP_FAILURE);
@@ -1371,9 +1431,11 @@ void JobCtrl::do_stop(struct JobCtrlReqInfo &jri) {
     _issue_ret_rb.insert_one(jri.req_data.req_stop_data.reason);
   }
   else {
-    // other printing
-    if (E_SUCCESS != smprinter.set_sys_status(status_before_start, &ret_sys_status)) {
-      LOG_E("job ctrl: can not enter status: %u\n", status_before_start);
+    // other printing, or PRINTING -> STOPING then here
+    enum SystemStatus next_status = hold_completed ? SYSTEM_STATUS_COMPLETED : status_before_start;
+    if (E_SUCCESS != smprinter.set_sys_status(next_status, &ret_sys_status)) {
+      LOG_E("job ctrl: can not enter status: %u\n", next_status);
+      hold_completed = false;
       smprinter.set_sys_status(SYSTEM_STATUS_IDLE, &ret_sys_status);
       _issue_ret_rb.insert_one(SACP_JOB_PAUSE_ISSUE_RET_STOP_FAILURE);
       DO_JOB_REQ_NOTIFY_CB(jri.cb, jri.param, E_FAILURE);
@@ -1384,6 +1446,14 @@ void JobCtrl::do_stop(struct JobCtrlReqInfo &jri) {
     _issue_ret_rb.insert_one(jri.req_data.req_stop_data.reason);
     // reset the status
     status_before_start = SYSTEM_STATUS_IDLE;
+  }
+
+  if (hold_completed && SYSTEM_STATUS_COMPLETED == smprinter.get_sys_status()) {
+    completed_tick_ms = system_svc.millis();
+    if (0 == completed_tick_ms) {
+      completed_tick_ms = 1;
+    }
+    LOG_I("job ctrl: hold COMPLETED until ack or timeout\r\n");
   }
 
   for (int i = 0; i < JOB_CTRL_NOTIFY_QUEUE_SIZE; i++) {
